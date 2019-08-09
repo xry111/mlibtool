@@ -1087,6 +1087,12 @@ static void ltlink(struct Options *opt)
 
                 i++;
 
+            } else if (!strcmp(arg, "-version-number") && narg) {
+                major = minor = revision = 0;
+                sscanf(narg, "%d:%d:%d", &major, &minor, &revision);
+
+                i++;
+
             } else if (!strncmp(arg, "-Wc,", 4)) {
                 WRITE_BUFFER(outCmd, arg + 4);
 
