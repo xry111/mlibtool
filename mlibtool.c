@@ -80,6 +80,7 @@
 /* make sure we're POSIX */
 #if defined(unix) || defined(__unix) || defined(__unix__)
 #include <unistd.h>
+#include <dirent.h>
 #endif
 
 #ifndef _POSIX_VERSION
@@ -325,7 +326,9 @@ static void execLibtool(struct Options *opt)
 
 /* Generic function to spawn a child and wait for it, exiting if the child
  * fails. */
-static void spawn(struct Options *opt, char *const *cmd)
+static void spawnInWorkdir(struct Options *opt,
+                           char *const *cmd,
+                           char *workdir)
 {
     size_t i;
     int fail = 0;
@@ -344,6 +347,11 @@ static void spawn(struct Options *opt, char *const *cmd)
         int tmpi;
         ORL(pid, fork, -1, ());
         if (pid == 0) {
+            if (workdir)
+                if (chdir(workdir) != 0) {
+                    perror("chdir");
+                    exit(1);
+                }
             execvp(cmd[0], cmd);
             perror(cmd[0]);
             exit(1);
@@ -362,6 +370,11 @@ static void spawn(struct Options *opt, char *const *cmd)
             exit(1);
         }
     }
+}
+
+static void spawn(struct Options *opt, char *const *cmd)
+{
+    spawnInWorkdir(opt, cmd, NULL);
 }
 
 /* Check for sanity by reading a .lo file. If cc is provided, fall back to that
@@ -820,6 +833,8 @@ static void linkLaFile(struct Options *opt,
                        struct Buffer *libDirs,
                        struct Buffer *dependencyLibs,
                        struct Buffer *tofree,
+                       struct Buffer *archives,
+                       struct Buffer *archiveNames,
                        char *arg)
 {
     /* link to this library */
@@ -853,9 +868,23 @@ static void linkLaFile(struct Options *opt,
         free(aarg);
     }
     if (wholeArchive) {
+        char *tmp;
         /* this is GNU-ld-specific, so retry if it doesn't work */
         opt->retryIfFail = 1;
         WRITE_BUFFER(*outCmd, "-Wl,--whole-archive");
+
+        ORL(aarg, malloc, NULL, (strlen(laDir) + strlen(laBase) + 10));
+        sprintf(aarg, "%s/.libs/%s.a", laDir, laBase);
+        if (tmp = realpath(aarg, NULL)) {
+            WRITE_BUFFER(*archives, tmp);
+            WRITE_BUFFER(*tofree, tmp);
+        } else {
+            WRITE_BUFFER(*archives, aarg);
+            WRITE_BUFFER(*tofree, aarg);
+        }
+        ORL(tmp, strdup, NULL, (laBase));
+        WRITE_BUFFER(*archiveNames, tmp);
+        WRITE_BUFFER(*tofree, tmp);
 
     } else {
         /* if we're not linking in the whole archive, then this becomes a
@@ -918,7 +947,7 @@ static void linkLaFile(struct Options *opt,
                     /* if this is a .la file, need to recurse */
                     char *ext = strrchr(part, '.');
                     if (ext && !strcmp(ext, ".la")) {
-                        linkLaFile(opt, buildLib, outCmd, libDirs, NULL, tofree, part);
+                        linkLaFile(opt, buildLib, outCmd, libDirs, NULL, tofree, archives, archiveNames, part);
 
                     } else {
                         /* otherwise, just add it */
@@ -943,6 +972,7 @@ static void linkLaFile(struct Options *opt,
 static void ltlink(struct Options *opt)
 {
     struct Buffer outCmd, outAr, libDirs, dependencyLibs, tofree;
+    struct Buffer archives, archiveNames;
     size_t i;
     char *ext;
     int tmpi;
@@ -1017,6 +1047,8 @@ static void ltlink(struct Options *opt)
     INIT_BUFFER(libDirs);
     INIT_BUFFER(dependencyLibs);
     INIT_BUFFER(tofree);
+    INIT_BUFFER(archives);
+    INIT_BUFFER(archiveNames);
 
     WRITE_BUFFER(outCmd, opt->cmd[0]);
     WRITE_BUFFER(outAr, "ar");
@@ -1169,7 +1201,7 @@ static void ltlink(struct Options *opt)
                 free(loDirC);
 
             } else if (ext && !strcmp(ext, ".la")) {
-                linkLaFile(opt, buildLib, &outCmd, &libDirs, &dependencyLibs, &tofree, arg);
+                linkLaFile(opt, buildLib, &outCmd, &libDirs, &dependencyLibs, &tofree, &archives, &archiveNames, arg);
 
             } else {
                 WRITE_BUFFER(outAr, arg);
@@ -1268,6 +1300,44 @@ static void ltlink(struct Options *opt)
     /* building a .a library is mostly simple */
     if (buildA) {
         char *apath;
+        struct Buffer outExtract;
+
+        INIT_BUFFER(outExtract);
+        WRITE_BUFFER(outExtract, "ar");
+        WRITE_BUFFER(outExtract, "x");
+        WRITE_BUFFER(outExtract, "a.a"); /* to be replaced */
+        WRITE_BUFFER(outExtract, NULL);
+
+        ORL(apath, malloc, NULL, (strlen(libsDir) + strlen(outBase) + 6));
+        sprintf(apath, "%s/%s.lax", libsDir, outBase);
+        mkdir(apath, 0777);
+        free(apath);
+
+        /* extract necessary archives */
+        for (i = 0; i < archives.bufused; i++) {
+            DIR *dir;
+            struct dirent *dirent;
+
+            ORL(apath, malloc, NULL, (strlen(libsDir) + strlen(outBase) + strlen(archiveNames.buf[i]) + 7));
+            sprintf(apath, "%s/%s.lax/%s", libsDir, outBase, archiveNames.buf[i]);
+            outExtract.buf[2] = archives.buf[i];
+            mkdir(apath, 0777);
+            spawnInWorkdir(opt, outExtract.buf, apath);
+
+            dir = opendir(apath);
+            for (dirent = readdir(dir); dirent != NULL; dirent = readdir(dir)) {
+                char *opath, *name = dirent->d_name;
+                int len = strlen(name);
+                if (len < 2 || name[len-1] != 'o' || name[len-2] != '.')
+                    continue;
+                ORL(opath, malloc, NULL, (strlen(apath) + strlen(name) + 2));
+                sprintf(opath, "%s/%s", apath, name);
+                WRITE_BUFFER(outAr, opath);
+                WRITE_BUFFER(tofree, opath);
+            }
+
+            free(apath);
+        }
 
         ORL(afile, malloc, NULL, (strlen(outBase) + 3));
         sprintf(afile, "%s.a", outBase);
@@ -1287,6 +1357,7 @@ static void ltlink(struct Options *opt)
         spawn(opt, outAr.buf + 1);
 
         free(apath);
+        FREE_BUFFER(outExtract);
     }
 
     /* and building a .so file is the most complicated */
@@ -1428,6 +1499,8 @@ static void ltlink(struct Options *opt)
 
     for (i = 0; i < tofree.bufused; i++) free(tofree.buf[i]);
 
+    FREE_BUFFER(archives);
+    FREE_BUFFER(archiveNames);
     FREE_BUFFER(tofree);
     FREE_BUFFER(dependencyLibs);
     FREE_BUFFER(libDirs);
