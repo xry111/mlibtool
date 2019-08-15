@@ -32,6 +32,7 @@
  */
 
 #define _XOPEN_SOURCE 500
+#define _GNU_SOURCE
 
 /* headers used in written .l* files */
 #define SANE_HEADER "# SYSTEM_IS_SANE\n"
@@ -55,7 +56,7 @@
                      "LD_LIBRARY_PATH=\"$LD_LIBRARY_PATH${LD_LIBRARY_PATH:+:}"
 #define BIN_SCRIPT_2 "\"\n" \
                      "export LD_LIBRARY_PATH\n" \
-                     "exec \""
+                     "exec ${_M_LT_WRAPPER_} \""
 #define BIN_SCRIPT_3 "\" \"$@\"\n"
 
 /* macro to fail with perror if a function fails */
@@ -297,7 +298,8 @@ enum Mode {
     MODE_UNKNOWN = 0,
     MODE_COMPILE,
     MODE_LINK,
-    MODE_INSTALL
+    MODE_INSTALL,
+    MODE_EXECUTE,
 };
 
 /* options necessary to handle modes */
@@ -326,9 +328,10 @@ static void execLibtool(struct Options *opt)
 
 /* Generic function to spawn a child and wait for it, exiting if the child
  * fails. */
-static void spawnInWorkdir(struct Options *opt,
-                           char *const *cmd,
-                           char *workdir)
+static void spawnInWorkdirEnv(struct Options *opt,
+                              char *const *cmd,
+                              char *workdir,
+                              char *const *envp)
 {
     size_t i;
     int fail = 0;
@@ -352,7 +355,9 @@ static void spawnInWorkdir(struct Options *opt,
                     perror("chdir");
                     exit(1);
                 }
-            execvp(cmd[0], cmd);
+            if (!envp)
+                envp = environ;
+            execvpe(cmd[0], cmd, envp);
             perror(cmd[0]);
             exit(1);
         }
@@ -370,6 +375,13 @@ static void spawnInWorkdir(struct Options *opt,
             exit(1);
         }
     }
+}
+
+static void spawnInWorkdir(struct Options *opt,
+                           char *const *cmd,
+                           char *workdir)
+{
+    spawnInWorkdirEnv(opt, cmd, workdir, NULL);
 }
 
 static void spawn(struct Options *opt, char *const *cmd)
@@ -418,6 +430,7 @@ static void usage(enum Mode mode);
 static void ltcompile(struct Options *);
 static void ltlink(struct Options *);
 static void ltinstall(struct Options *);
+static void ltexecute(struct Options *);
 
 int main(int argc, char **argv)
 {
@@ -518,6 +531,8 @@ int main(int argc, char **argv)
         mode = MODE_LINK;
     } else if (!strcmp(modeS, "install")) {
         mode = MODE_INSTALL;
+    } else if (!strcmp(modeS, "execute")) {
+        mode = MODE_EXECUTE;
     }
 
     /* if they're asking for mode help, give it to them */
@@ -534,7 +549,7 @@ int main(int argc, char **argv)
             sane = systemIsSane(opt.cmd[0], opt.cmd);
         } else if (mode == MODE_LINK) {
             sane = checkLoSanity(&opt, opt.cmd[0]);
-        } else if (mode == MODE_INSTALL) {
+        } else if (mode == MODE_INSTALL || mode == MODE_EXECUTE) {
             /* we can always do something here */
             sane = 1;
         }
@@ -552,6 +567,9 @@ int main(int argc, char **argv)
 
     } else if (mode == MODE_INSTALL) {
         ltinstall(&opt);
+
+    } else if (mode == MODE_EXECUTE) {
+        ltexecute(&opt);
 
     } else {
         execLibtool(&opt);
@@ -616,7 +634,7 @@ static void usage(enum Mode mode)
                "\t-shrext, -static, -static-libtool-libs, -weak\n"
                "\n");
 
-    } else if (mode == MODE_INSTALL) {
+    } else if (mode == MODE_INSTALL || mode == MODE_EXECUTE) {
         printf("\t(none)\n\n");
 
     }
@@ -1653,6 +1671,32 @@ static void ltinstall(struct Options *opt)
     FREE_BUFFER(tofree);
     FREE_BUFFER(cpCmd);
     FREE_BUFFER(installCmd);
+}
+
+static void ltexecute(struct Options *opt)
+{
+    if (!strcmp(opt->cmd[0], "ldd")) {
+        char *wrapper_env;
+        char **ptr;
+        struct Buffer envBuf;
+
+        ORX(wrapper_env, malloc, NULL, (strlen(opt->cmd[0]) + 16));
+        strcpy(wrapper_env, "_M_LT_WRAPPER_=");
+        strcat(wrapper_env, opt->cmd[0]);
+
+        INIT_BUFFER(envBuf);
+
+        for (ptr = environ; *ptr != NULL; ptr++)
+            WRITE_BUFFER(envBuf, *ptr);
+        WRITE_BUFFER(envBuf, wrapper_env);
+
+        spawnInWorkdirEnv(opt, opt->cmd + 1, NULL, envBuf.buf);
+
+        FREE_BUFFER(envBuf);
+        free(wrapper_env);
+    } else {
+        spawn(opt, opt->cmd);
+    }
 }
 
 #endif /* _POSIX_VERSION */
