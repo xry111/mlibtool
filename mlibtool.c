@@ -487,6 +487,8 @@ int main(int argc, char **argv)
         } else if (!strncmp(arg, "--mode=", 7) && argi < argc - 1) {
             modeS = arg + 7;
             argi++;
+            while (argv[argi][0] == '-')
+                argi++;
             break;
 
         } else if (!strncmp(arg, "--tag=", 6) ||
