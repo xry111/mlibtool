@@ -1085,7 +1085,10 @@ static void ltlink(struct Options *opt)
         char *narg = opt->cmd[i+1];
 
         if (arg[0] == '-') {
-            if (!strcmp(arg, "-all-static")) {
+            if (!strcmp(arg, "-I")) {
+                i++;
+
+            } else if (!strcmp(arg, "-all-static")) {
                 WRITE_BUFFER(outCmd, "-static");
 
             } else if (!strcmp(arg, "-avoid-version")) {
