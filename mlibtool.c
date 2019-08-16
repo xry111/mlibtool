@@ -133,6 +133,22 @@ struct Buffer {
     free((ubuf).buf); \
 } while (0)
 
+/* Omit these from rpath.  TODO: make it configurable and use a trie. */
+static const char *system_rt_libdir[] = {
+    "/usr/lib/x86_64-linux-gnu",
+    "/lib/x86_64-linux-gnu",
+    "/usr/lib/x86_64-linux-gnu",
+    "/lib/i386-linux-gnu",
+    NULL,
+};
+
+int is_system_rt_libdir(const char *s)
+{
+    for (const char **p = system_rt_libdir; *p != NULL; p++)
+        if (!strcmp(*p, s))
+            return 1;
+    return 0;
+}
 
 /* Generate a filename to cache sanity (allocates) */
 static char *cachedSanityName(char *cc, char **argv)
@@ -952,6 +968,21 @@ static void linkLaFile(struct Options *opt,
                 ORL(lbuf, realloc, NULL, (lbuf, lbufsz));
                 if (!fgets(lbuf + lbufused, lbufsz - lbufused, f)) break;
                 lbufused = strlen(lbuf);
+            }
+
+            /* handle libdir line for rpath */
+            if (!strncmp(lbuf, "libdir='", 8)) {
+                char *st = lbuf + 8;
+                char *en = strrchr(st, '\''), *rpath_arg;
+                if (en)
+                    *en = 0;
+                /* add -Wl,-rpath=<rpath> */
+                if (is_system_rt_libdir(st))
+                    continue;
+                ORL(rpath_arg, malloc, NULL, (strlen(st) + 12));
+                sprintf(rpath_arg, "-Wl,-rpath=%s", st);
+                WRITE_BUFFER(*outCmd, rpath_arg);
+                WRITE_BUFFER(*tofree, rpath_arg);
             }
 
             /* is this a dependency_libs line? */
